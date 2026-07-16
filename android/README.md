@@ -40,16 +40,16 @@ skipped rather than producing slop.
 | Field | Notes |
 |-------|-------|
 | GitHub token | Classic or fine-grained PAT with `repo` scope (fork + read + push to your fork). |
-| Ollama base URL | Self-hosted `http://<host>:11434`, or `https://ollama.com` for Ollama Cloud. |
-| Ollama model | e.g. a DeepSeek cloud tag. **Set the exact tag your endpoint serves** — verify it with `ollama list` / the Cloud model catalogue; an unknown tag returns a 404 at run time. |
-| Ollama API key | Required only for Ollama Cloud. |
+| Ollama base URL | Defaults to `https://ollama.com` (Ollama Cloud). For a self-hosted server use `http://<host>:11434`. |
+| Ollama model | Defaults to `deepseek-v4-flash:cloud`. Set the exact tag your endpoint serves; an unknown tag returns a 404 at run time. |
+| Ollama API key | Required for Ollama Cloud (`https://ollama.com`). Create one at ollama.com. Leave blank for a self-hosted server. |
 | Author name / email | Stamped on every automated commit. Defaults to `Ilum <Ilum@linux.org>`. |
 | Daily min/max | Pacing target (recommended 5–15). The background worker spreads drafts across the day. |
 | Auto-run | When on, a ~hourly `WorkManager` job drafts up to the day's target automatically. |
 | Repositories | The repos to pull issues from. Pre-seeded with the swarms set. |
 
-The default emulator loopback (`10.0.2.2`) points at a host machine running Ollama; change it for a
-real device or Cloud.
+For a self-hosted server on an emulator, `10.0.2.2` reaches the host machine; on a real device use
+the server's LAN IP.
 
 ## Building
 

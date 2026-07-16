@@ -18,9 +18,10 @@ data class RepoTarget(
 @Serializable
 data class AppConfig(
     val githubToken: String = "",
-    // Ollama endpoint. Self-hosted default; for Ollama Cloud use https://ollama.com + an API key.
-    val ollamaBaseUrl: String = "http://10.0.2.2:11434",
-    val ollamaModel: String = "deepseek-v3.1:cloud",
+    // Defaults target Ollama Cloud (the phone has no local Ollama). For a self-hosted
+    // server use http://<host>:11434 and leave the API key blank.
+    val ollamaBaseUrl: String = "https://ollama.com",
+    val ollamaModel: String = "deepseek-v4-flash:cloud",
     val ollamaApiKey: String = "",
     // Commit identity applied to every automated commit.
     val authorName: String = "Ilum",
