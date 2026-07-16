@@ -3,6 +3,7 @@ package eu.euroswarms.surgeon.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,11 +20,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -280,8 +284,6 @@ private fun SetupScreen(vm: AppViewModel) {
     var dailyMax by remember(saved) { mutableStateOf(saved.dailyMax.toString()) }
     var autoRun by remember(saved) { mutableStateOf(saved.autoRunEnabled) }
     val repos = remember(saved) { mutableStateListOf<RepoTarget>().apply { addAll(saved.repos) } }
-    var newOwner by remember { mutableStateOf("") }
-    var newName by remember { mutableStateOf("") }
     var savedFlash by remember { mutableStateOf(false) }
 
     Column(
@@ -295,10 +297,45 @@ private fun SetupScreen(vm: AppViewModel) {
         Text("Ollama", fontWeight = FontWeight.SemiBold)
         OutlinedTextField(ollamaUrl, { ollamaUrl = it }, label = { Text("Base URL") },
             modifier = Modifier.fillMaxWidth(), singleLine = true)
-        OutlinedTextField(ollamaModel, { ollamaModel = it }, label = { Text("Model") },
-            modifier = Modifier.fillMaxWidth(), singleLine = true)
         OutlinedTextField(ollamaKey, { ollamaKey = it }, label = { Text("API key (Ollama Cloud, optional)") },
             modifier = Modifier.fillMaxWidth(), singleLine = true)
+
+        // Model: free text plus a picker fed by the endpoint's /api/tags.
+        val availableModels by vm.availableModels.collectAsState()
+        val modelsMessage by vm.modelsMessage.collectAsState()
+        var modelMenuOpen by remember { mutableStateOf(false) }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(ollamaModel, { ollamaModel = it }, label = { Text("Model") },
+                modifier = Modifier.weight(1f), singleLine = true)
+            Box {
+                TextButton(onClick = {
+                    vm.fetchModels(ollamaUrl, ollamaKey)
+                    modelMenuOpen = true
+                }) { Text("List ▾") }
+                DropdownMenu(expanded = modelMenuOpen, onDismissRequest = { modelMenuOpen = false }) {
+                    if (availableModels.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text(modelsMessage ?: "Loading models…") },
+                            onClick = { },
+                            enabled = false,
+                        )
+                    } else {
+                        availableModels.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model) },
+                                onClick = {
+                                    ollamaModel = model
+                                    modelMenuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        modelsMessage?.let {
+            Text(it, fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.outline)
+        }
 
         Text("Commit identity", fontWeight = FontWeight.SemiBold)
         OutlinedTextField(authorName, { authorName = it }, label = { Text("Author name") },
@@ -320,23 +357,41 @@ private fun SetupScreen(vm: AppViewModel) {
         }
 
         Text("Repositories", fontWeight = FontWeight.SemiBold)
-        repos.toList().forEach { repo ->
+        Text(
+            "Each entry can pin the exact fork to use. Without a fork mapping, the app uses " +
+                "<your login>/<repo> and creates the fork if it's missing.",
+            fontSize = 12.sp,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.outline,
+        )
+
+        var editIndex by remember { mutableStateOf<Int?>(null) } // null = closed, -1 = new entry
+        repos.toList().forEachIndexed { index, repo ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(repo.fullName, Modifier.weight(1f), fontSize = 14.sp)
-                TextButton(onClick = { repos.remove(repo); savedFlash = false }) { Text("Remove") }
+                Column(Modifier.weight(1f)) {
+                    Text(repo.fullName, fontSize = 14.sp)
+                    repo.forkOverrideLabel?.let {
+                        Text("fork: $it", fontSize = 12.sp,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary)
+                    }
+                }
+                TextButton(onClick = { editIndex = index }) { Text("Edit") }
+                TextButton(onClick = { repos.removeAt(index); savedFlash = false }) { Text("Remove") }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(newOwner, { newOwner = it }, label = { Text("owner") },
-                modifier = Modifier.weight(1f), singleLine = true)
-            OutlinedTextField(newName, { newName = it }, label = { Text("repo") },
-                modifier = Modifier.weight(1f), singleLine = true)
-            TextButton(onClick = {
-                if (newOwner.isNotBlank() && newName.isNotBlank()) {
-                    repos.add(RepoTarget(newOwner.trim(), newName.trim()))
-                    newOwner = ""; newName = ""
-                }
-            }) { Text("Add") }
+        OutlinedButton(onClick = { editIndex = -1 }, modifier = Modifier.fillMaxWidth()) {
+            Text("Add repository")
+        }
+
+        editIndex?.let { idx ->
+            RepoEditDialog(
+                initial = repos.getOrNull(idx),
+                onDismiss = { editIndex = null },
+                onSave = { target ->
+                    if (idx >= 0 && idx < repos.size) repos[idx] = target else repos.add(target)
+                    savedFlash = false
+                    editIndex = null
+                },
+            )
         }
 
         Button(
@@ -362,6 +417,65 @@ private fun SetupScreen(vm: AppViewModel) {
         if (savedFlash) Text("Saved.", color = androidx.compose.material3.MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(24.dp))
     }
+}
+
+/**
+ * Add/edit a repository entry: the upstream to watch and, optionally, the exact fork to use.
+ * Blank fork fields mean "default": <your login> / <upstream repo name>.
+ */
+@Composable
+private fun RepoEditDialog(
+    initial: RepoTarget?,
+    onDismiss: () -> Unit,
+    onSave: (RepoTarget) -> Unit,
+) {
+    var owner by remember { mutableStateOf(initial?.owner.orEmpty()) }
+    var name by remember { mutableStateOf(initial?.name.orEmpty()) }
+    var forkOwner by remember { mutableStateOf(initial?.forkOwner.orEmpty()) }
+    var forkName by remember { mutableStateOf(initial?.forkName.orEmpty()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial == null) "Add repository" else "Edit repository") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Upstream", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                OutlinedTextField(owner, { owner = it }, label = { Text("Owner") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                OutlinedTextField(name, { name = it }, label = { Text("Repository") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Text("Fork mapping (optional)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(
+                    "Leave blank to use <your login>/<repository> (auto-created if missing). " +
+                        "Fill in to pin an existing fork — it is verified, never created.",
+                    fontSize = 12.sp,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.outline,
+                )
+                OutlinedTextField(forkOwner, { forkOwner = it }, label = { Text("Fork owner") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                OutlinedTextField(forkName, { forkName = it }, label = { Text("Fork repository") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = owner.isNotBlank() && name.isNotBlank(),
+                onClick = {
+                    onSave(
+                        RepoTarget(
+                            owner = owner.trim(),
+                            name = name.trim(),
+                            forkOwner = forkOwner.trim().ifBlank { null },
+                            forkName = forkName.trim().ifBlank { null },
+                        ),
+                    )
+                },
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 private fun startOfTodayMillis(): Long {

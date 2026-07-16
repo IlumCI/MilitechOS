@@ -2,13 +2,31 @@ package eu.euroswarms.surgeon.data
 
 import kotlinx.serialization.Serializable
 
-/** A repository the bot is allowed to work on, e.g. owner="kyegomez", name="swarms". */
+/**
+ * A repository the bot is allowed to work on, e.g. owner="kyegomez", name="swarms".
+ *
+ * [forkOwner]/[forkName] optionally pin the exact fork to use. When unset, the app assumes
+ * the fork lives at <your login>/<name> and creates it if missing. When set, the app uses
+ * the named fork verbatim (after verifying it really is a fork of this upstream) and never
+ * auto-creates anything.
+ */
 @Serializable
 data class RepoTarget(
     val owner: String,
     val name: String,
+    val forkOwner: String? = null,
+    val forkName: String? = null,
 ) {
     val fullName: String get() = "$owner/$name"
+
+    /** Human-readable fork override, or null when using the default guess. */
+    val forkOverrideLabel: String?
+        get() {
+            val fo = forkOwner?.takeIf { it.isNotBlank() }
+            val fn = forkName?.takeIf { it.isNotBlank() }
+            if (fo == null && fn == null) return null
+            return "${fo ?: "(you)"}/${fn ?: name}"
+        }
 }
 
 /**

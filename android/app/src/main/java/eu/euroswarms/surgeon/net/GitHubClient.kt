@@ -107,7 +107,7 @@ class GitHubClient(private val token: String) {
     suspend fun ensureFork(owner: String, name: String, myLogin: String, baseBranch: String): String {
         val existing = runCatching { getRepo(myLogin, name) }.getOrNull()
         if (existing != null) {
-            requireIsForkOf(existing, owner, name, myLogin)
+            requireIsForkOf(existing, owner, name, myLogin, name)
             return myLogin
         }
         // Create the fork (async on GitHub's side).
@@ -118,7 +118,7 @@ class GitHubClient(private val token: String) {
             delay(2000)
             val repo = runCatching { getRepo(myLogin, name) }.getOrNull()
             if (repo != null) {
-                requireIsForkOf(repo, owner, name, myLogin)
+                requireIsForkOf(repo, owner, name, myLogin, name)
                 val branchReady = runCatching { getBranchHeadSha(myLogin, name, baseBranch) }.isSuccess
                 if (branchReady) return myLogin
             }
@@ -126,13 +126,33 @@ class GitHubClient(private val token: String) {
         throw ApiException(504, "", "Fork of $owner/$name did not become available in time")
     }
 
-    private fun requireIsForkOf(repo: GhRepo, owner: String, name: String, myLogin: String) {
-        val expected = "$owner/$name"
+    /**
+     * Verify a user-specified fork: it must exist, be a fork, and its parent must be exactly
+     * the intended upstream. Used when the fork mapping is configured manually.
+     */
+    suspend fun verifyFork(forkOwner: String, forkName: String, upstreamOwner: String, upstreamName: String) {
+        val repo = runCatching { getRepo(forkOwner, forkName) }.getOrElse {
+            throw ApiException(
+                404, "",
+                "Configured fork $forkOwner/$forkName is not accessible with this token",
+            )
+        }
+        requireIsForkOf(repo, upstreamOwner, upstreamName, forkOwner, forkName)
+    }
+
+    private fun requireIsForkOf(
+        repo: GhRepo,
+        upstreamOwner: String,
+        upstreamName: String,
+        forkOwner: String,
+        forkName: String,
+    ) {
+        val expected = "$upstreamOwner/$upstreamName"
         val actualParent = repo.parent?.fullName.orEmpty()
         if (!repo.fork || !actualParent.equals(expected, ignoreCase = true)) {
             throw ApiException(
                 409, "",
-                "Repo $myLogin/$name exists but is not a fork of $expected " +
+                "Repo $forkOwner/$forkName exists but is not a fork of $expected " +
                     "(fork=${repo.fork}, parent=${actualParent.ifBlank { "none" }}). Refusing to touch it.",
             )
         }

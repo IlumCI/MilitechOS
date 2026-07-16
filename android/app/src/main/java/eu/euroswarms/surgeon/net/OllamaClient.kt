@@ -21,6 +21,12 @@ private data class OllamaChatResponse(
     @SerialName("done") val done: Boolean = true,
 )
 
+@Serializable
+private data class OllamaModelEntry(val name: String = "", val model: String = "")
+
+@Serializable
+private data class OllamaTagsResponse(val models: List<OllamaModelEntry> = emptyList())
+
 data class ChatMessage(val role: String, val content: String)
 
 /**
@@ -34,6 +40,30 @@ class OllamaClient(
 ) {
     private val jsonMedia = "application/json".toMediaType()
     private val endpoint = baseUrl.trimEnd('/') + "/api/chat"
+
+    /** Lists model tags available on this endpoint (GET /api/tags). */
+    suspend fun listModels(): List<String> {
+        val builder = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/tags")
+            .header("User-Agent", "Surgeon-Android")
+            .get()
+        if (apiKey.isNotBlank()) builder.header("Authorization", "Bearer $apiKey")
+
+        val body = withContext(Dispatchers.IO) {
+            Http.client.newCall(builder.build()).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw ApiException(resp.code, text, "Ollama tags → ${resp.code}")
+                }
+                text
+            }
+        }
+        return Http.json.decodeFromString(OllamaTagsResponse.serializer(), body)
+            .models
+            .mapNotNull { entry -> entry.name.ifBlank { entry.model }.takeIf { it.isNotBlank() } }
+            .distinct()
+            .sorted()
+    }
 
     /**
      * Sends a non-streaming chat completion. When [forceJson] is set, asks the server to

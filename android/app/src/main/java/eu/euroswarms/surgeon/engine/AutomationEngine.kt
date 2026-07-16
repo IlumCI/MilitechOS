@@ -100,30 +100,47 @@ class AutomationEngine(
         return fresh.state == "open" && fresh.assignees.isEmpty() && !fresh.locked
     }
 
+    /**
+     * Resolve which fork to work in. An explicit mapping on the RepoTarget wins (verified,
+     * never auto-created); otherwise fall back to <myLogin>/<name>, creating it if needed.
+     */
+    private suspend fun resolveFork(repo: RepoTarget, myLogin: String, baseBranch: String): Pair<String, String> {
+        val explicitOwner = repo.forkOwner?.takeIf { it.isNotBlank() }
+        val explicitName = repo.forkName?.takeIf { it.isNotBlank() }
+        if (explicitOwner == null && explicitName == null) {
+            github.ensureFork(repo.owner, repo.name, myLogin, baseBranch)
+            return myLogin to repo.name
+        }
+        val forkOwner = explicitOwner ?: myLogin
+        val forkName = explicitName ?: repo.name
+        github.verifyFork(forkOwner, forkName, repo.owner, repo.name)
+        return forkOwner to forkName
+    }
+
     private suspend fun processIssue(repo: RepoTarget, issue: GhIssue, myLogin: String): EngineResult {
         val meta = github.getRepo(repo.owner, repo.name)
         val danger = meta.isPrivate
         val baseBranch = meta.defaultBranch
         val issueBody = issue.body.orEmpty().take(MAX_ISSUE_BODY_CHARS)
 
-        github.ensureFork(repo.owner, repo.name, myLogin, baseBranch)
-        github.syncForkBranch(myLogin, repo.name, baseBranch)
+        val (forkOwner, forkName) = resolveFork(repo, myLogin, baseBranch)
+        github.syncForkBranch(forkOwner, forkName, baseBranch)
 
         // Divergence guard: we only ever build on a fork that exactly matches upstream.
         // A diverged fork is how merge conflicts happen — refuse rather than risk it.
         val upstreamSha = github.getBranchHeadSha(repo.owner, repo.name, baseBranch)
-        val baseSha = github.getBranchHeadSha(myLogin, repo.name, baseBranch)
+        val baseSha = github.getBranchHeadSha(forkOwner, forkName, baseBranch)
         if (baseSha != upstreamSha) {
             store.log(
                 LogLevel.ERROR,
-                "Fork $myLogin/${repo.name}:$baseBranch has diverged from upstream — " +
+                "Fork $forkOwner/$forkName:$baseBranch has diverged from upstream — " +
                     "sync or recreate the fork manually. Skipping this repo.",
             )
             return EngineResult.Skipped("Fork diverged from upstream")
         }
 
         // Locate the files to touch, feeding the model the most issue-relevant paths first.
-        val paths = rankPaths(github.listSourcePaths(myLogin, repo.name, baseSha), issue.title, issueBody)
+        val paths = rankPaths(github.listSourcePaths(forkOwner, forkName, baseSha), issue.title, issueBody)
         val targetPaths = agent.locate(issue.title, issueBody, paths)
         if (targetPaths.isEmpty()) {
             store.markProcessed(repo.fullName, issue.number)
@@ -134,7 +151,7 @@ class AutomationEngine(
         // Fetch current contents.
         val files = LinkedHashMap<String, String>()
         for (path in targetPaths) {
-            val content = runCatching { github.getFileContent(myLogin, repo.name, path, baseSha) }.getOrDefault("")
+            val content = runCatching { github.getFileContent(forkOwner, forkName, path, baseSha) }.getOrDefault("")
             if (content.isNotEmpty()) files[path] = content
         }
         if (files.isEmpty()) {
@@ -159,7 +176,7 @@ class AutomationEngine(
                 // otherwise we would silently overwrite an existing file.
                 for (edit in outcome.edits.filter { it.isNew }) {
                     val existing = runCatching {
-                        github.getFileContent(myLogin, repo.name, edit.path, baseSha)
+                        github.getFileContent(forkOwner, forkName, edit.path, baseSha)
                     }.getOrDefault("")
                     if (existing.isNotEmpty()) {
                         store.markProcessed(repo.fullName, issue.number)
@@ -182,7 +199,7 @@ class AutomationEngine(
                     return EngineResult.Skipped("Issue no longer workable")
                 }
 
-                return commitDraft(repo, issue, myLogin, baseBranch, baseSha, danger, outcome)
+                return commitDraft(repo, issue, forkOwner, forkName, baseBranch, baseSha, danger, outcome)
             }
         }
     }
@@ -190,22 +207,23 @@ class AutomationEngine(
     private suspend fun commitDraft(
         repo: RepoTarget,
         issue: GhIssue,
-        myLogin: String,
+        forkOwner: String,
+        forkName: String,
         baseBranch: String,
         baseSha: String,
         danger: Boolean,
         outcome: AgentOutcome.Ready,
     ): EngineResult {
-        val headBranch = createUniqueBranch(myLogin, repo.name, issue.number, issue.title, baseSha)
+        val headBranch = createUniqueBranch(forkOwner, forkName, issue.number, issue.title, baseSha)
 
-        val baseTreeSha = github.getCommitTreeSha(myLogin, repo.name, baseSha)
+        val baseTreeSha = github.getCommitTreeSha(forkOwner, forkName, baseSha)
         val entries = outcome.finalContents.map { (path, content) ->
-            path to github.createBlob(myLogin, repo.name, content)
+            path to github.createBlob(forkOwner, forkName, content)
         }
-        val treeSha = github.createTree(myLogin, repo.name, baseTreeSha, entries)
+        val treeSha = github.createTree(forkOwner, forkName, baseTreeSha, entries)
         val commitSha = github.createCommit(
-            forkOwner = myLogin,
-            name = repo.name,
+            forkOwner = forkOwner,
+            name = forkName,
             message = outcome.commitMessage,
             treeSha = treeSha,
             parentSha = baseSha,
@@ -213,15 +231,15 @@ class AutomationEngine(
             authorEmail = config.authorEmail,
             isoDate = Instant.now().toString(),
         )
-        github.updateRef(myLogin, repo.name, headBranch, commitSha)
+        github.updateRef(forkOwner, forkName, headBranch, commitSha)
 
         val compareUrl = "https://github.com/${repo.owner}/${repo.name}/compare/" +
-            "$baseBranch...$myLogin:${repo.name}:$headBranch?expand=1"
+            "$baseBranch...$forkOwner:$forkName:$headBranch?expand=1"
 
         val draft = DraftPr(
             id = UUID.randomUUID().toString(),
             repoFullName = repo.fullName,
-            forkFullName = "$myLogin/${repo.name}",
+            forkFullName = "$forkOwner/$forkName",
             baseBranch = baseBranch,
             headBranch = headBranch,
             issueNumber = issue.number,

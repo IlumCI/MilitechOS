@@ -11,6 +11,7 @@ import eu.euroswarms.surgeon.data.LogEntry
 import eu.euroswarms.surgeon.data.Store
 import eu.euroswarms.surgeon.engine.AutomationEngine
 import eu.euroswarms.surgeon.engine.EngineResult
+import eu.euroswarms.surgeon.net.OllamaClient
 import eu.euroswarms.surgeon.work.Scheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +34,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val isRunning = MutableStateFlow(false)
     val lastRunMessage = MutableStateFlow<String?>(null)
+
+    // Model picker state: tags fetched from the configured Ollama endpoint.
+    val availableModels = MutableStateFlow<List<String>>(emptyList())
+    val modelsMessage = MutableStateFlow<String?>(null)
+
+    /** Query /api/tags on the endpoint the user is currently typing (not necessarily saved). */
+    fun fetchModels(baseUrl: String, apiKey: String) {
+        if (baseUrl.isBlank()) {
+            modelsMessage.value = "Enter the Ollama base URL first"
+            return
+        }
+        viewModelScope.launch {
+            modelsMessage.value = "Loading models…"
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    OllamaClient(baseUrl.trim(), model = "", apiKey = apiKey.trim()).listModels()
+                }
+            }.onSuccess { models ->
+                availableModels.value = models
+                modelsMessage.value = if (models.isEmpty()) "Endpoint returned no models" else null
+            }.onFailure {
+                availableModels.value = emptyList()
+                modelsMessage.value = "Could not list models: ${it.message}"
+            }
+        }
+    }
 
     fun draftsToday(): Int = store.draftsToday()
 

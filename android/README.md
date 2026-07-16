@@ -51,12 +51,12 @@ skipped rather than producing slop.
 |-------|-------|
 | GitHub token | Classic or fine-grained PAT with `repo` scope (fork + read + push to your fork). |
 | Ollama base URL | Defaults to `https://ollama.com` (Ollama Cloud). For a self-hosted server use `http://<host>:11434`. |
-| Ollama model | Defaults to `deepseek-v4-flash:cloud`. Set the exact tag your endpoint serves; an unknown tag returns a 404 at run time. |
+| Ollama model | Defaults to `deepseek-v4-flash:cloud`. Type a tag or tap **List ▾** to pick from the models your endpoint actually serves (`/api/tags`). |
 | Ollama API key | Required for Ollama Cloud (`https://ollama.com`). Create one at ollama.com. Leave blank for a self-hosted server. |
 | Author name / email | Stamped on every automated commit. Defaults to `Ilum <Ilum@linux.org>`. |
 | Daily min/max | Pacing target (recommended 5–15). The background worker spreads drafts across the day. |
 | Auto-run | When on, a ~hourly `WorkManager` job drafts up to the day's target automatically. |
-| Repositories | The repos to pull issues from. Pre-seeded with the swarms set. |
+| Repositories | The repos to pull issues from. Pre-seeded with the swarms set. Each entry can optionally pin the exact fork (owner + name); unset means `<your login>/<repo>`, auto-created if missing. Pinned forks are verified against the upstream and never auto-created. |
 
 For a self-hosted server on an emulator, `10.0.2.2` reaches the host machine; on a real device use
 the server's LAN IP.
