@@ -15,7 +15,6 @@ import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.ByteArrayInputStream
 import java.net.URLEncoder
 import java.util.Base64
 
@@ -25,11 +24,15 @@ import java.util.Base64
 data class GhUser(val login: String = "")
 
 @Serializable
+data class GhParent(@SerialName("full_name") val fullName: String = "")
+
+@Serializable
 data class GhRepo(
     @SerialName("full_name") val fullName: String = "",
     @SerialName("private") val isPrivate: Boolean = false,
     @SerialName("default_branch") val defaultBranch: String = "main",
     val fork: Boolean = false,
+    val parent: GhParent? = null,
 )
 
 @Serializable
@@ -45,6 +48,7 @@ data class GhIssue(
     val assignees: List<GhUser> = emptyList(),
     val labels: List<GhLabel> = emptyList(),
     val state: String = "open",
+    val locked: Boolean = false,
 ) {
     val isPullRequest: Boolean get() = pullRequest != null
 }
@@ -91,18 +95,47 @@ class GitHubClient(private val token: String) {
         ).filter { !it.isPullRequest }
     }
 
-    /** Ensure the authenticated user has a fork of owner/name; returns the fork owner login. */
-    suspend fun ensureFork(owner: String, name: String, myLogin: String): String {
-        // Already forked?
-        runCatching { getRepo(myLogin, name) }.getOrNull()?.let { return myLogin }
+    /** Fetch a single issue's current state (for re-verification right before committing). */
+    suspend fun getIssue(owner: String, name: String, number: Int): GhIssue =
+        Http.json.decodeFromString(GhIssue.serializer(), get("$base/repos/$owner/$name/issues/$number"))
+
+    /**
+     * Ensure the authenticated user has a fork of owner/name and that its git data is ready.
+     * Verifies that any repo already sitting at myLogin/name really is a fork of THIS upstream —
+     * otherwise we could commit branches into an unrelated same-named repository.
+     */
+    suspend fun ensureFork(owner: String, name: String, myLogin: String, baseBranch: String): String {
+        val existing = runCatching { getRepo(myLogin, name) }.getOrNull()
+        if (existing != null) {
+            requireIsForkOf(existing, owner, name, myLogin)
+            return myLogin
+        }
         // Create the fork (async on GitHub's side).
         post("$base/repos/$owner/$name/forks", buildJsonObject { })
-        // Poll until the fork is queryable.
+        // Poll until the fork's metadata AND git data are queryable (fresh forks
+        // report repo metadata before their branches are readable).
         repeat(20) {
             delay(2000)
-            runCatching { getRepo(myLogin, name) }.getOrNull()?.let { return myLogin }
+            val repo = runCatching { getRepo(myLogin, name) }.getOrNull()
+            if (repo != null) {
+                requireIsForkOf(repo, owner, name, myLogin)
+                val branchReady = runCatching { getBranchHeadSha(myLogin, name, baseBranch) }.isSuccess
+                if (branchReady) return myLogin
+            }
         }
         throw ApiException(504, "", "Fork of $owner/$name did not become available in time")
+    }
+
+    private fun requireIsForkOf(repo: GhRepo, owner: String, name: String, myLogin: String) {
+        val expected = "$owner/$name"
+        val actualParent = repo.parent?.fullName.orEmpty()
+        if (!repo.fork || !actualParent.equals(expected, ignoreCase = true)) {
+            throw ApiException(
+                409, "",
+                "Repo $myLogin/$name exists but is not a fork of $expected " +
+                    "(fork=${repo.fork}, parent=${actualParent.ifBlank { "none" }}). Refusing to touch it.",
+            )
+        }
     }
 
     /** Fast-forward the fork's [branch] to upstream. Best-effort: diverged/conflicting forks are left as-is. */
@@ -136,7 +169,7 @@ class GitHubClient(private val token: String) {
     }
 
     /** Returns source-file paths in the tree at [sha]. Filtered to editable text extensions and capped. */
-    suspend fun listSourcePaths(owner: String, name: String, sha: String, cap: Int = 400): List<String> {
+    suspend fun listSourcePaths(owner: String, name: String, sha: String, cap: Int = 1000): List<String> {
         val body = get("$base/repos/$owner/$name/git/trees/$sha?recursive=1")
         val tree = Http.json.decodeFromString(GhTree.serializer(), body)
         return tree.tree
@@ -281,7 +314,3 @@ class GitHubClient(private val token: String) {
         )
     }
 }
-
-// Unused helper retained for callers that may stream large blobs later.
-internal fun decodeBase64Stream(b64: String): ByteArrayInputStream =
-    ByteArrayInputStream(Base64.getDecoder().decode(b64.replace("\n", "")))

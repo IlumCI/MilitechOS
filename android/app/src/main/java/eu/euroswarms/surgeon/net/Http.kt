@@ -16,7 +16,7 @@ object Http {
 
     val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS) // model calls can be slow
+        .readTimeout(300, TimeUnit.SECONDS) // model calls can be slow
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 }

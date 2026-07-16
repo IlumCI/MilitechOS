@@ -44,12 +44,17 @@ class AutomationEngine(
         val myLogin = me.login
         if (myLogin.isBlank()) return EngineResult.Failed("Could not resolve GitHub identity")
 
-        // Try repos in random order until one yields a workable issue.
+        // Try repos in random order. A skip (abstain/reject/stale issue) burns that issue
+        // but shouldn't end the run — move on to the next candidate, up to a small budget.
+        var attempts = 0
+        var lastSkip: EngineResult.Skipped? = null
         val repos = config.repos.shuffled(Random.Default)
         for (repo in repos) {
+            if (attempts >= MAX_ATTEMPTS_PER_RUN) break
             val picked = pickIssue(repo) ?: continue
+            attempts++
             store.log(LogLevel.INFO, "Selected ${repo.fullName}#${picked.number}: ${picked.title}")
-            return try {
+            val result = try {
                 processIssue(repo, picked, myLogin)
             } catch (e: ApiException) {
                 store.log(LogLevel.ERROR, "API error on ${repo.fullName}#${picked.number}: ${e.message} ${trimBody(e.body)}")
@@ -58,7 +63,12 @@ class AutomationEngine(
                 store.log(LogLevel.ERROR, "Error on ${repo.fullName}#${picked.number}: ${e.message}")
                 EngineResult.Failed(e.message ?: "unknown error")
             }
+            when (result) {
+                is EngineResult.Skipped -> lastSkip = result // try the next candidate
+                else -> return result
+            }
         }
+        lastSkip?.let { return it }
         store.log(LogLevel.WARN, "No unprocessed issues found across configured repos")
         return EngineResult.NoWork
     }
@@ -68,26 +78,53 @@ class AutomationEngine(
             store.log(LogLevel.WARN, "Could not list issues for ${repo.fullName}: ${it.message}")
             return null
         }
-        val fresh = issues.filter { !store.isProcessed(repo.fullName, it.number) }
-        if (fresh.isEmpty()) return null
-        // Prefer unassigned issues; fall back to any fresh one.
-        val unassigned = fresh.filter { it.assignees.isEmpty() }
-        val pool = unassigned.ifEmpty { fresh }
-        return pool.random(Random.Default)
+        // Workable = open, not seen before, unassigned, not locked, and not carrying a
+        // label that disqualifies it (wontfix, question, blocked, ...).
+        val pool = issues.filter { issue ->
+            issue.state == "open" &&
+                !store.isProcessed(repo.fullName, issue.number) &&
+                issue.assignees.isEmpty() &&
+                !issue.locked &&
+                issue.labels.none { normalizeLabel(it.name) in SKIP_LABELS }
+        }
+        return pool.randomOrNull(Random.Default)
+    }
+
+    /**
+     * The issue list is a snapshot, and the model call takes a while — re-fetch the single
+     * issue and confirm it is STILL open, unassigned, and unlocked before we commit anything.
+     */
+    private suspend fun issueStillWorkable(repo: RepoTarget, number: Int): Boolean {
+        val fresh = runCatching { github.getIssue(repo.owner, repo.name, number) }.getOrNull()
+            ?: return false
+        return fresh.state == "open" && fresh.assignees.isEmpty() && !fresh.locked
     }
 
     private suspend fun processIssue(repo: RepoTarget, issue: GhIssue, myLogin: String): EngineResult {
         val meta = github.getRepo(repo.owner, repo.name)
         val danger = meta.isPrivate
         val baseBranch = meta.defaultBranch
+        val issueBody = issue.body.orEmpty().take(MAX_ISSUE_BODY_CHARS)
 
-        github.ensureFork(repo.owner, repo.name, myLogin)
+        github.ensureFork(repo.owner, repo.name, myLogin, baseBranch)
         github.syncForkBranch(myLogin, repo.name, baseBranch)
-        val baseSha = github.getBranchHeadSha(myLogin, repo.name, baseBranch)
 
-        // Locate the files to touch.
-        val paths = github.listSourcePaths(myLogin, repo.name, baseSha)
-        val targetPaths = agent.locate(issue.title, issue.body.orEmpty(), paths)
+        // Divergence guard: we only ever build on a fork that exactly matches upstream.
+        // A diverged fork is how merge conflicts happen — refuse rather than risk it.
+        val upstreamSha = github.getBranchHeadSha(repo.owner, repo.name, baseBranch)
+        val baseSha = github.getBranchHeadSha(myLogin, repo.name, baseBranch)
+        if (baseSha != upstreamSha) {
+            store.log(
+                LogLevel.ERROR,
+                "Fork $myLogin/${repo.name}:$baseBranch has diverged from upstream — " +
+                    "sync or recreate the fork manually. Skipping this repo.",
+            )
+            return EngineResult.Skipped("Fork diverged from upstream")
+        }
+
+        // Locate the files to touch, feeding the model the most issue-relevant paths first.
+        val paths = rankPaths(github.listSourcePaths(myLogin, repo.name, baseSha), issue.title, issueBody)
+        val targetPaths = agent.locate(issue.title, issueBody, paths)
         if (targetPaths.isEmpty()) {
             store.markProcessed(repo.fullName, issue.number)
             store.log(LogLevel.WARN, "Agent found no relevant files for ${repo.fullName}#${issue.number}; skipped")
@@ -106,7 +143,7 @@ class AutomationEngine(
         }
 
         // Plan the surgical change.
-        when (val outcome = agent.plan(issue.title, issue.body.orEmpty(), files, danger)) {
+        when (val outcome = agent.plan(issue.title, issueBody, files, danger)) {
             is AgentOutcome.Abstained -> {
                 store.markProcessed(repo.fullName, issue.number)
                 store.log(LogLevel.WARN, "Agent abstained on ${repo.fullName}#${issue.number}: ${outcome.reason}")
@@ -118,6 +155,33 @@ class AutomationEngine(
                 return EngineResult.Skipped("Rejected: ${outcome.reason}")
             }
             is AgentOutcome.Ready -> {
+                // "New" files must be new to the whole repo, not just to the fetched set —
+                // otherwise we would silently overwrite an existing file.
+                for (edit in outcome.edits.filter { it.isNew }) {
+                    val existing = runCatching {
+                        github.getFileContent(myLogin, repo.name, edit.path, baseSha)
+                    }.getOrDefault("")
+                    if (existing.isNotEmpty()) {
+                        store.markProcessed(repo.fullName, issue.number)
+                        store.log(
+                            LogLevel.WARN,
+                            "Rejected ${repo.fullName}#${issue.number}: agent marked existing file '${edit.path}' as new",
+                        )
+                        return EngineResult.Skipped("Rejected: '${edit.path}' already exists")
+                    }
+                }
+
+                // Final freshness gate: the issue may have been closed, assigned, or locked
+                // while the model was working. Never commit against a dead issue.
+                if (!issueStillWorkable(repo, issue.number)) {
+                    store.markProcessed(repo.fullName, issue.number)
+                    store.log(
+                        LogLevel.WARN,
+                        "Discarded work on ${repo.fullName}#${issue.number}: issue was closed/assigned/locked mid-run",
+                    )
+                    return EngineResult.Skipped("Issue no longer workable")
+                }
+
                 return commitDraft(repo, issue, myLogin, baseBranch, baseSha, danger, outcome)
             }
         }
@@ -196,11 +260,42 @@ class AutomationEngine(
             candidate
         } catch (e: ApiException) {
             // 422 == ref already exists; disambiguate with a short suffix.
+            // Anything else (auth, permissions, ...) must propagate, not be retried blindly.
+            if (e.code != 422) throw e
             val suffixed = "$candidate-${System.currentTimeMillis() % 100000}"
             github.createBranch(forkOwner, name, suffixed, baseSha)
             suffixed
         }
     }
+
+    /**
+     * Orders candidate paths by textual relevance to the issue so the locate model sees the
+     * most promising files first (and truncation drops the least relevant, not the
+     * alphabetically unlucky). Filename hits count more than directory hits.
+     */
+    private fun rankPaths(paths: List<String>, issueTitle: String, issueBody: String): List<String> {
+        val tokens = "$issueTitle $issueBody".lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 3 }
+            .distinct()
+        if (tokens.isEmpty()) return paths.take(MAX_CANDIDATE_PATHS)
+        return paths
+            .sortedByDescending { path ->
+                val lower = path.lowercase()
+                val fileName = lower.substringAfterLast('/')
+                tokens.sumOf { token ->
+                    when {
+                        fileName.contains(token) -> 3
+                        lower.contains(token) -> 1
+                        else -> 0
+                    } as Int
+                }
+            }
+            .take(MAX_CANDIDATE_PATHS)
+    }
+
+    private fun normalizeLabel(name: String): String =
+        name.lowercase().replace(Regex("[\\s_]+"), "-")
 
     private fun slugify(title: String): String {
         val slug = title.lowercase()
@@ -212,4 +307,16 @@ class AutomationEngine(
     }
 
     private fun trimBody(body: String): String = body.take(300)
+
+    companion object {
+        private const val MAX_ISSUE_BODY_CHARS = 6_000
+        private const val MAX_CANDIDATE_PATHS = 300
+        private const val MAX_ATTEMPTS_PER_RUN = 3
+
+        /** Issues with any of these labels are never picked. */
+        private val SKIP_LABELS = setOf(
+            "wontfix", "duplicate", "invalid", "question", "discussion",
+            "blocked", "on-hold", "needs-discussion", "wip",
+        )
+    }
 }

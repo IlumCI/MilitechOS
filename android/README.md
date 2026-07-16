@@ -34,6 +34,16 @@ skipped rather than producing slop.
 - **Non-breaking bias.** The system prompt forbids refactors, renames, reformatting, and unrelated
   edits; validation drops anything that doesn't apply cleanly.
 - **No duplicates.** Processed issues are remembered so the same one is never picked twice.
+- **Only live, workable issues.** Candidates must be open, unassigned, unlocked, and free of
+  disqualifying labels (`wontfix`, `duplicate`, `question`, `blocked`, …) — and the issue is
+  **re-fetched and re-verified right before committing**, so work is discarded if it was closed,
+  assigned, or locked while the model was running.
+- **Fork identity verification.** Before touching `you/<repo>`, the app confirms it really is a
+  fork of the intended upstream — a same-named unrelated repo is refused outright.
+- **Divergence guard.** After syncing, the fork's head must exactly match upstream's; a diverged
+  fork (the merge-conflict scenario) is skipped with a loud log instead of being built on.
+- **No silent overwrites.** A file the agent claims is "new" is checked against the repo at the
+  base commit; if it already exists, the change is rejected.
 
 ## Configuration (Setup tab)
 
