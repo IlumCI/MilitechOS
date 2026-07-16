@@ -162,7 +162,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Delete orphaned surgeon/* branches on the forks. */
+    /** Delete orphaned surgeon-prefixed branches on the forks. */
     fun cleanupBranches() {
         viewModelScope.launch {
             maintenanceMessage.value = "Cleaning up branches…"

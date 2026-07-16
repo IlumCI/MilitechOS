@@ -89,7 +89,7 @@ class AutomationEngine(
             .filter { isWorkable(repo, it) }
 
     /**
-     * Delete surgeon/* branches on the configured forks that no live draft references.
+     * Delete surgeon-prefixed branches on the configured forks that no live draft references.
      * Returns how many branches were deleted.
      */
     suspend fun cleanupOrphanBranches(): Int {
