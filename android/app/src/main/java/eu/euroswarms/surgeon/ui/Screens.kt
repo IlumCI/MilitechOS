@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -64,9 +65,9 @@ import eu.euroswarms.surgeon.data.RepoTarget
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App(vm: AppViewModel) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
-    val titles = listOf("Dashboard", "Review", "Setup")
+fun App(vm: AppViewModel, initialTab: Int = 0) {
+    var tab by rememberSaveable { mutableIntStateOf(initialTab.coerceIn(0, 3)) }
+    val titles = listOf("Dashboard", "Issues", "Review", "Setup")
     Scaffold(
         topBar = { TopAppBar(title = { Text("Surgeon · ${titles[tab]}") }) },
         bottomBar = {
@@ -80,12 +81,18 @@ fun App(vm: AppViewModel) {
                 NavigationBarItem(
                     selected = tab == 1,
                     onClick = { tab = 1 },
-                    icon = { Icon(Icons.Default.List, null) },
-                    label = { Text("Review") },
+                    icon = { Icon(Icons.Default.Search, null) },
+                    label = { Text("Issues") },
                 )
                 NavigationBarItem(
                     selected = tab == 2,
                     onClick = { tab = 2 },
+                    icon = { Icon(Icons.Default.List, null) },
+                    label = { Text("Review") },
+                )
+                NavigationBarItem(
+                    selected = tab == 3,
+                    onClick = { tab = 3 },
                     icon = { Icon(Icons.Default.Settings, null) },
                     label = { Text("Setup") },
                 )
@@ -95,8 +102,58 @@ fun App(vm: AppViewModel) {
         Column(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
                 0 -> DashboardScreen(vm)
-                1 -> ReviewScreen(vm)
+                1 -> IssuesScreen(vm)
+                2 -> ReviewScreen(vm)
                 else -> SetupScreen(vm)
+            }
+        }
+    }
+}
+
+/** Browse workable issues across the configured repos and draft a specific one. */
+@Composable
+private fun IssuesScreen(vm: AppViewModel) {
+    val rows by vm.browseIssues.collectAsState()
+    val loading by vm.browseLoading.collectAsState()
+    val isRunning by vm.isRunning.collectAsState()
+    val lastMsg by vm.lastRunMessage.collectAsState()
+
+    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { vm.loadIssues() }, enabled = !loading, modifier = Modifier.weight(1f)) {
+                Text(if (loading) "Loading…" else "Load workable issues")
+            }
+        }
+        lastMsg?.let { Text(it, fontSize = 13.sp) }
+
+        if (rows.isEmpty() && !loading) {
+            Text(
+                "No issues loaded. Tap the button to scan the configured repos for open, " +
+                    "unassigned, unlocked issues.",
+                color = androidx.compose.material3.MaterialTheme.colorScheme.outline,
+            )
+        }
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(rows, key = { "${it.repo.fullName}#${it.number}" }) { row ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("${row.repo.fullName}#${row.number}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(row.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 14.sp)
+                        if (row.labels.isNotEmpty()) {
+                            Text(
+                                row.labels.joinToString("  ") { "[$it]" },
+                                fontSize = 12.sp,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                        Button(
+                            onClick = { vm.draftIssue(row) },
+                            enabled = !isRunning,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Draft this issue") }
+                    }
+                }
             }
         }
     }
@@ -152,6 +209,27 @@ private fun DashboardScreen(vm: AppViewModel) {
         }
         lastMsg?.let { Text(it) }
 
+        // Maintenance: skipped-issue retry + orphan branch cleanup.
+        val skippedCount by vm.skippedCount.collectAsState()
+        val maintenanceMsg by vm.maintenanceMessage.collectAsState()
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Maintenance", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { vm.retrySkipped() },
+                        enabled = skippedCount > 0,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Retry skipped ($skippedCount)") }
+                    OutlinedButton(
+                        onClick = { vm.cleanupBranches() },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Clean branches") }
+                }
+                maintenanceMsg?.let { Text(it, fontSize = 13.sp) }
+            }
+        }
+
         Divider()
         Text("Activity log", fontWeight = FontWeight.SemiBold)
         if (logs.isEmpty()) {
@@ -173,31 +251,35 @@ private fun DashboardScreen(vm: AppViewModel) {
 @Composable
 private fun ReviewScreen(vm: AppViewModel) {
     val drafts by vm.drafts.collectAsState()
+    val refreshing by vm.isRefreshingDrafts.collectAsState()
     val context = LocalContext.current
     val visible = drafts.filter { it.status == DraftStatus.DRAFT || it.status == DraftStatus.SUBMITTED }
 
-    if (visible.isEmpty()) {
-        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
-            Text("Nothing to review yet. Draft a PR from the Dashboard.")
-        }
-        return
-    }
+    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedButton(
+            onClick = { vm.refreshDrafts() },
+            enabled = !refreshing && visible.any { it.status == DraftStatus.DRAFT },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (refreshing) "Re-checking issue status…" else "Re-check issue status") }
 
-    LazyColumn(
-        Modifier.fillMaxSize().padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(visible, key = { it.id }) { draft ->
-            DraftCard(
-                draft = draft,
-                onOpenPr = {
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(draft.compareUrl)))
-                    }
-                },
-                onSubmitted = { vm.setDraftStatus(draft.id, DraftStatus.SUBMITTED) },
-                onDiscard = { vm.setDraftStatus(draft.id, DraftStatus.DISCARDED) },
-            )
+        if (visible.isEmpty()) {
+            Text("Nothing to review yet. Draft a PR from the Dashboard or Issues tab.")
+            return@Column
+        }
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(visible, key = { it.id }) { draft ->
+                DraftCard(
+                    draft = draft,
+                    onOpenPr = {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(draft.compareUrl)))
+                        }
+                    },
+                    onSubmitted = { vm.setDraftStatus(draft.id, DraftStatus.SUBMITTED) },
+                    onDiscard = { vm.discardDraft(draft) },
+                )
+            }
         }
     }
 }
@@ -223,6 +305,13 @@ private fun DraftCard(
                 }
             }
             Text(draft.issueTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (draft.isStale) {
+                Text(
+                    "⚠ Issue was closed/locked after drafting — this PR is probably obsolete. Discard it.",
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                    fontSize = 13.sp,
+                )
+            }
             Text(
                 "commit: ${draft.commitMessage.substringBefore('\n')}",
                 fontSize = 13.sp,

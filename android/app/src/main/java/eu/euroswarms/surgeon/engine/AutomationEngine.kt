@@ -10,6 +10,7 @@ import eu.euroswarms.surgeon.net.ApiException
 import eu.euroswarms.surgeon.net.GitHubClient
 import eu.euroswarms.surgeon.net.GhIssue
 import eu.euroswarms.surgeon.net.OllamaClient
+import eu.euroswarms.surgeon.net.RateLimitException
 import java.time.Instant
 import java.util.UUID
 import kotlin.random.Random
@@ -23,26 +24,21 @@ sealed interface EngineResult {
 
 /**
  * Runs the full workflow once: pick an issue → prepare the fork branch → surgical agent →
- * commit as the configured identity → record a draft awaiting the human PR gate.
+ * validate + self-review → commit as the configured identity → record a draft awaiting the
+ * human PR gate. Clients are injectable for testing.
  */
 class AutomationEngine(
     private val config: AppConfig,
     private val store: Store,
-) {
-    private val github = GitHubClient(config.githubToken)
-    private val agent = SurgicalAgent(
+    private val github: GitHubClient = GitHubClient(config.githubToken),
+    private val agent: SurgicalAgent = SurgicalAgent(
         OllamaClient(config.ollamaBaseUrl, config.ollamaModel, config.ollamaApiKey),
-    )
+    ),
+) {
 
     suspend fun runOnce(): EngineResult {
         if (!config.isReady) return EngineResult.Failed("Configuration incomplete")
-
-        val me = runCatching { github.getAuthenticatedUser() }.getOrElse {
-            store.log(LogLevel.ERROR, "GitHub auth failed: ${it.message}")
-            return EngineResult.Failed("GitHub auth failed: ${it.message}")
-        }
-        val myLogin = me.login
-        if (myLogin.isBlank()) return EngineResult.Failed("Could not resolve GitHub identity")
+        val myLogin = resolveLogin() ?: return EngineResult.Failed("GitHub auth failed")
 
         // Try repos in random order. A skip (abstain/reject/stale issue) burns that issue
         // but shouldn't end the run — move on to the next candidate, up to a small budget.
@@ -54,16 +50,7 @@ class AutomationEngine(
             val picked = pickIssue(repo) ?: continue
             attempts++
             store.log(LogLevel.INFO, "Selected ${repo.fullName}#${picked.number}: ${picked.title}")
-            val result = try {
-                processIssue(repo, picked, myLogin)
-            } catch (e: ApiException) {
-                store.log(LogLevel.ERROR, "API error on ${repo.fullName}#${picked.number}: ${e.message} ${trimBody(e.body)}")
-                EngineResult.Failed("${e.message}")
-            } catch (e: Exception) {
-                store.log(LogLevel.ERROR, "Error on ${repo.fullName}#${picked.number}: ${e.message}")
-                EngineResult.Failed(e.message ?: "unknown error")
-            }
-            when (result) {
+            when (val result = guardedProcess(repo, picked, myLogin)) {
                 is EngineResult.Skipped -> lastSkip = result // try the next candidate
                 else -> return result
             }
@@ -73,21 +60,103 @@ class AutomationEngine(
         return EngineResult.NoWork
     }
 
+    /**
+     * Draft a specific issue chosen by the user. Bypasses the retryable-skip memory
+     * (an explicit pick means "try it anyway") but never re-drafts a processed issue.
+     */
+    suspend fun runOnIssue(repo: RepoTarget, issueNumber: Int): EngineResult {
+        if (!config.isReady) return EngineResult.Failed("Configuration incomplete")
+        val myLogin = resolveLogin() ?: return EngineResult.Failed("GitHub auth failed")
+
+        if (store.isProcessed(repo.fullName, issueNumber)) {
+            return EngineResult.Skipped("Issue was already drafted or handled")
+        }
+        val issue = runCatching { github.getIssue(repo.owner, repo.name, issueNumber) }.getOrElse {
+            return EngineResult.Failed("Could not fetch issue: ${it.message}")
+        }
+        if (issue.isPullRequest) return EngineResult.Skipped("That number is a pull request")
+        if (issue.state != "open" || issue.assignees.isNotEmpty() || issue.locked) {
+            return EngineResult.Skipped("Issue is not open/unassigned/unlocked")
+        }
+        store.log(LogLevel.INFO, "Manually selected ${repo.fullName}#$issueNumber: ${issue.title}")
+        return guardedProcess(repo, issue, myLogin)
+    }
+
+    /** Open, unseen, unassigned, unlocked, label-eligible issues for the browse tab. */
+    suspend fun listWorkableIssues(repo: RepoTarget): List<GhIssue> =
+        runCatching { github.listOpenIssues(repo.owner, repo.name) }
+            .getOrDefault(emptyList())
+            .filter { isWorkable(repo, it) }
+
+    /**
+     * Delete surgeon/* branches on the configured forks that no live draft references.
+     * Returns how many branches were deleted.
+     */
+    suspend fun cleanupOrphanBranches(): Int {
+        val myLogin = resolveLogin() ?: return 0
+        val active = store.drafts.value
+            .filter { it.status == DraftStatus.DRAFT || it.status == DraftStatus.SUBMITTED }
+            .map { it.forkFullName to it.headBranch }
+            .toSet()
+        var deleted = 0
+        for (repo in config.repos) {
+            val forkOwner = repo.forkOwner?.takeIf { it.isNotBlank() } ?: myLogin
+            val forkName = repo.forkName?.takeIf { it.isNotBlank() } ?: repo.name
+            val branches = runCatching { github.listBranches(forkOwner, forkName) }.getOrDefault(emptyList())
+            for (branch in branches) {
+                if (!branch.startsWith(BRANCH_PREFIX)) continue
+                if (("$forkOwner/$forkName" to branch) in active) continue
+                if (runCatching { github.deleteRef(forkOwner, forkName, branch) }.isSuccess) deleted++
+            }
+        }
+        store.log(LogLevel.INFO, "Branch cleanup: deleted $deleted orphan branch(es)")
+        return deleted
+    }
+
+    // ---- internals ----
+
+    private suspend fun resolveLogin(): String? {
+        val me = runCatching { github.getAuthenticatedUser() }.getOrElse {
+            store.log(LogLevel.ERROR, "GitHub auth failed: ${it.message}")
+            return null
+        }
+        return me.login.takeIf { it.isNotBlank() }
+    }
+
+    /** Runs processIssue with uniform error handling (rate limits get special treatment). */
+    private suspend fun guardedProcess(repo: RepoTarget, issue: GhIssue, myLogin: String): EngineResult {
+        return try {
+            processIssue(repo, issue, myLogin)
+        } catch (e: RateLimitException) {
+            store.log(
+                LogLevel.ERROR,
+                "GitHub rate limit hit on ${repo.fullName}#${issue.number}; backing off" +
+                    (e.retryAfterSeconds?.let { " (~${it}s)" } ?: ""),
+            )
+            EngineResult.Failed("Rate limited by GitHub — will retry later")
+        } catch (e: ApiException) {
+            store.log(LogLevel.ERROR, "API error on ${repo.fullName}#${issue.number}: ${e.message} ${e.body.take(300)}")
+            EngineResult.Failed("${e.message}")
+        } catch (e: Exception) {
+            store.log(LogLevel.ERROR, "Error on ${repo.fullName}#${issue.number}: ${e.message}")
+            EngineResult.Failed(e.message ?: "unknown error")
+        }
+    }
+
+    private fun isWorkable(repo: RepoTarget, issue: GhIssue): Boolean =
+        issue.state == "open" &&
+            !store.isProcessed(repo.fullName, issue.number) &&
+            !store.isSkipped(repo.fullName, issue.number) &&
+            issue.assignees.isEmpty() &&
+            !issue.locked &&
+            issue.labels.none { EngineUtils.normalizeLabel(it.name) in EngineUtils.SKIP_LABELS }
+
     private suspend fun pickIssue(repo: RepoTarget): GhIssue? {
         val issues = runCatching { github.listOpenIssues(repo.owner, repo.name) }.getOrElse {
             store.log(LogLevel.WARN, "Could not list issues for ${repo.fullName}: ${it.message}")
             return null
         }
-        // Workable = open, not seen before, unassigned, not locked, and not carrying a
-        // label that disqualifies it (wontfix, question, blocked, ...).
-        val pool = issues.filter { issue ->
-            issue.state == "open" &&
-                !store.isProcessed(repo.fullName, issue.number) &&
-                issue.assignees.isEmpty() &&
-                !issue.locked &&
-                issue.labels.none { normalizeLabel(it.name) in SKIP_LABELS }
-        }
-        return pool.randomOrNull(Random.Default)
+        return issues.filter { isWorkable(repo, it) }.randomOrNull(Random.Default)
     }
 
     /**
@@ -117,6 +186,13 @@ class AutomationEngine(
         return forkOwner to forkName
     }
 
+    /** Retryable outcome: remember as skipped (user can clear) and report. */
+    private suspend fun skipRetryable(repo: RepoTarget, issue: GhIssue, reason: String): EngineResult {
+        store.markSkipped(repo.fullName, issue.number)
+        store.log(LogLevel.WARN, "Skipped ${repo.fullName}#${issue.number}: $reason")
+        return EngineResult.Skipped(reason)
+    }
+
     private suspend fun processIssue(repo: RepoTarget, issue: GhIssue, myLogin: String): EngineResult {
         val meta = github.getRepo(repo.owner, repo.name)
         val danger = meta.isPrivate
@@ -140,12 +216,13 @@ class AutomationEngine(
         }
 
         // Locate the files to touch, feeding the model the most issue-relevant paths first.
-        val paths = rankPaths(github.listSourcePaths(forkOwner, forkName, baseSha), issue.title, issueBody)
+        val paths = EngineUtils.rankPaths(
+            github.listSourcePaths(forkOwner, forkName, baseSha),
+            issue.title, issueBody, MAX_CANDIDATE_PATHS,
+        )
         val targetPaths = agent.locate(issue.title, issueBody, paths)
         if (targetPaths.isEmpty()) {
-            store.markProcessed(repo.fullName, issue.number)
-            store.log(LogLevel.WARN, "Agent found no relevant files for ${repo.fullName}#${issue.number}; skipped")
-            return EngineResult.Skipped("No relevant files located")
+            return skipRetryable(repo, issue, "No relevant files located")
         }
 
         // Fetch current contents.
@@ -155,23 +232,31 @@ class AutomationEngine(
             if (content.isNotEmpty()) files[path] = content
         }
         if (files.isEmpty()) {
-            store.markProcessed(repo.fullName, issue.number)
-            return EngineResult.Skipped("Could not read located files")
+            return skipRetryable(repo, issue, "Could not read located files")
         }
 
         // Plan the surgical change.
         when (val outcome = agent.plan(issue.title, issueBody, files, danger)) {
             is AgentOutcome.Abstained -> {
-                store.markProcessed(repo.fullName, issue.number)
-                store.log(LogLevel.WARN, "Agent abstained on ${repo.fullName}#${issue.number}: ${outcome.reason}")
-                return EngineResult.Skipped("Abstained: ${outcome.reason}")
+                return skipRetryable(repo, issue, "Abstained: ${outcome.reason}")
             }
             is AgentOutcome.Rejected -> {
-                store.markProcessed(repo.fullName, issue.number)
-                store.log(LogLevel.WARN, "Change rejected by safety checks on ${repo.fullName}#${issue.number}: ${outcome.reason}")
-                return EngineResult.Skipped("Rejected: ${outcome.reason}")
+                return skipRetryable(repo, issue, "Rejected: ${outcome.reason}")
             }
             is AgentOutcome.Ready -> {
+                // Structural sanity of every final file (cheap, local, before any token spend).
+                for ((path, content) in outcome.finalContents) {
+                    EditValidators.validate(path, content)?.let { error ->
+                        return skipRetryable(repo, issue, "Validation failed in $path: $error")
+                    }
+                }
+
+                // Independent self-review: a second model call must actively approve the change.
+                val (approved, critique) = agent.critique(issue.title, issueBody, outcome, danger)
+                if (!approved) {
+                    return skipRetryable(repo, issue, "Critic rejected: $critique")
+                }
+
                 // "New" files must be new to the whole repo, not just to the fetched set —
                 // otherwise we would silently overwrite an existing file.
                 for (edit in outcome.edits.filter { it.isNew }) {
@@ -179,12 +264,7 @@ class AutomationEngine(
                         github.getFileContent(forkOwner, forkName, edit.path, baseSha)
                     }.getOrDefault("")
                     if (existing.isNotEmpty()) {
-                        store.markProcessed(repo.fullName, issue.number)
-                        store.log(
-                            LogLevel.WARN,
-                            "Rejected ${repo.fullName}#${issue.number}: agent marked existing file '${edit.path}' as new",
-                        )
-                        return EngineResult.Skipped("Rejected: '${edit.path}' already exists")
+                        return skipRetryable(repo, issue, "Agent marked existing file '${edit.path}' as new")
                     }
                 }
 
@@ -271,8 +351,8 @@ class AutomationEngine(
         title: String,
         baseSha: String,
     ): String {
-        val slug = slugify(title)
-        val candidate = "surgeon/issue-$issueNumber-$slug"
+        val slug = EngineUtils.slugify(title)
+        val candidate = "$BRANCH_PREFIX/issue-$issueNumber-$slug"
         return try {
             github.createBranch(forkOwner, name, candidate, baseSha)
             candidate
@@ -286,55 +366,10 @@ class AutomationEngine(
         }
     }
 
-    /**
-     * Orders candidate paths by textual relevance to the issue so the locate model sees the
-     * most promising files first (and truncation drops the least relevant, not the
-     * alphabetically unlucky). Filename hits count more than directory hits.
-     */
-    private fun rankPaths(paths: List<String>, issueTitle: String, issueBody: String): List<String> {
-        val tokens = "$issueTitle $issueBody".lowercase()
-            .split(Regex("[^a-z0-9]+"))
-            .filter { it.length >= 3 }
-            .distinct()
-        if (tokens.isEmpty()) return paths.take(MAX_CANDIDATE_PATHS)
-        return paths
-            .sortedByDescending { path ->
-                val lower = path.lowercase()
-                val fileName = lower.substringAfterLast('/')
-                tokens.sumOf { token ->
-                    when {
-                        fileName.contains(token) -> 3
-                        lower.contains(token) -> 1
-                        else -> 0
-                    } as Int
-                }
-            }
-            .take(MAX_CANDIDATE_PATHS)
-    }
-
-    private fun normalizeLabel(name: String): String =
-        name.lowercase().replace(Regex("[\\s_]+"), "-")
-
-    private fun slugify(title: String): String {
-        val slug = title.lowercase()
-            .map { if (it.isLetterOrDigit()) it else '-' }
-            .joinToString("")
-            .replace(Regex("-+"), "-")
-            .trim('-')
-        return slug.take(40).trim('-').ifBlank { "change" }
-    }
-
-    private fun trimBody(body: String): String = body.take(300)
-
     companion object {
         private const val MAX_ISSUE_BODY_CHARS = 6_000
         private const val MAX_CANDIDATE_PATHS = 300
         private const val MAX_ATTEMPTS_PER_RUN = 3
-
-        /** Issues with any of these labels are never picked. */
-        private val SKIP_LABELS = setOf(
-            "wontfix", "duplicate", "invalid", "question", "discussion",
-            "blocked", "on-hold", "needs-discussion", "wip",
-        )
+        private const val BRANCH_PREFIX = "surgeon"
     }
 }

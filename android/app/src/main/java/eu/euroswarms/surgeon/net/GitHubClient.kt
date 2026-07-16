@@ -74,10 +74,16 @@ private data class GhContent(val content: String = "", val encoding: String = ""
 @Serializable
 private data class GhShaResp(val sha: String = "")
 
-/** Client for the subset of the GitHub REST + Git Data API the pipeline needs. */
-class GitHubClient(private val token: String) {
+@Serializable
+private data class GhBranch(val name: String = "")
 
-    private val base = "https://api.github.com"
+/** Client for the subset of the GitHub REST + Git Data API the pipeline needs. */
+class GitHubClient(
+    private val token: String,
+    baseUrl: String = "https://api.github.com",
+) {
+
+    private val base = baseUrl.trimEnd('/')
     private val jsonMedia = "application/json".toMediaType()
 
     // ---------- Public API ----------
@@ -288,6 +294,17 @@ class GitHubClient(private val token: String) {
         )
     }
 
+    suspend fun deleteRef(owner: String, name: String, branch: String) {
+        delete("$base/repos/$owner/$name/git/refs/heads/${enc(branch)}")
+    }
+
+    suspend fun listBranches(owner: String, name: String): List<String> {
+        val body = get("$base/repos/$owner/$name/branches?per_page=100")
+        return Http.json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(GhBranch.serializer()), body,
+        ).map { it.name }
+    }
+
     // ---------- HTTP plumbing ----------
 
     private fun baseRequest(url: String): Request.Builder =
@@ -306,10 +323,26 @@ class GitHubClient(private val token: String) {
     private suspend fun patch(url: String, body: JsonObject): String =
         exec(baseRequest(url).patch(body.toString().toRequestBody(jsonMedia)).build())
 
+    private suspend fun delete(url: String): String =
+        exec(baseRequest(url).delete().build())
+
     private suspend fun exec(request: Request): String = withContext(Dispatchers.IO) {
         Http.client.newCall(request).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                // GitHub signals rate limiting via 429, or 403 with a drained quota header.
+                val remaining = resp.header("x-ratelimit-remaining")
+                val isRateLimit = resp.code == 429 ||
+                    (resp.code == 403 && (remaining == "0" || body.contains("rate limit", ignoreCase = true)))
+                if (isRateLimit) {
+                    val retryAfter = resp.header("retry-after")?.toLongOrNull()
+                        ?: resp.header("x-ratelimit-reset")?.toLongOrNull()
+                            ?.let { reset -> maxOf(0L, reset - System.currentTimeMillis() / 1000) }
+                    throw RateLimitException(
+                        resp.code, body, retryAfter,
+                        "GitHub rate limit hit (${resp.code}); retry after ${retryAfter ?: "unknown"}s",
+                    )
+                }
                 throw ApiException(resp.code, body, "GitHub ${request.method} ${request.url.encodedPath} → ${resp.code}")
             }
             body

@@ -4,7 +4,15 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
-class ApiException(val code: Int, val body: String, message: String) : Exception(message)
+open class ApiException(val code: Int, val body: String, message: String) : Exception(message)
+
+/** GitHub primary/secondary rate limit hit. Callers should back off, not retry immediately. */
+class RateLimitException(
+    code: Int,
+    body: String,
+    val retryAfterSeconds: Long?,
+    message: String,
+) : ApiException(code, body, message)
 
 object Http {
     val json = Json {

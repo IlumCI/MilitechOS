@@ -104,6 +104,8 @@ data class DraftPr(
     val status: DraftStatus = DraftStatus.DRAFT,
     val createdAt: Long,
     val errorMessage: String = "",
+    // Set when a re-check finds the issue was closed/locked after this draft was created.
+    val isStale: Boolean = false,
 )
 
 enum class LogLevel { INFO, WARN, ERROR, SUCCESS }

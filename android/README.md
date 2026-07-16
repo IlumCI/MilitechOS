@@ -44,6 +44,39 @@ skipped rather than producing slop.
   fork (the merge-conflict scenario) is skipped with a loud log instead of being built on.
 - **No silent overwrites.** A file the agent claims is "new" is checked against the repo at the
   base commit; if it already exists, the change is rejected.
+- **Independent self-review.** A second model call critiques the produced diff against the issue
+  (complete? minimal? non-breaking?) and must actively approve it; unparseable critic output
+  fails closed. Structural validators run first: edited `.json` must parse, `.yml`/`.yaml` must
+  not use tab indentation, and no file may be left empty.
+- **Retryable vs permanent memory.** Abstains/rejections are remembered as *skipped* (re-enable
+  them any time with "Retry skipped" — useful after switching to a better model); only drafted or
+  dead issues are burned permanently.
+- **Rate-limit aware.** 429s and drained-quota 403s are detected and surfaced as a clean back-off
+  instead of hammering the API.
+- **Branch janitor.** Discarding a draft deletes its branch on the fork; "Clean branches" removes
+  orphaned `surgeon/*` branches that no live draft references (never touches anything else).
+- **Stale-draft detection.** "Re-check issue status" in Review flags drafts whose issue was
+  closed or locked after drafting, so you don't submit an obsolete PR.
+
+## Testing
+
+The pipeline is covered by a JVM test suite (`app/src/test`) that runs in CI **before** the APK
+is built — a red test fails the build:
+
+- `AutomationEngineTest` — end-to-end: a fake GitHub API and a fake Ollama server (OkHttp
+  MockWebServer) drive the real engine, clients, and agent through the complete
+  issue → fork → locate → plan → validate → critique → commit workflow. Asserts the commit is
+  authored as the configured identity, the blob carries the edited content, safety gates fire
+  (closed-mid-run, diverged fork, critic rejection, labels, rate limits), manual pick semantics,
+  and the branch janitor's spare/delete behaviour.
+- `SurgicalAgentTest` — edit validation (missing/ambiguous `old_string`, file caps, size caps,
+  danger-mode caps, fenced JSON, abstain, garbage output) and critic parsing (fails closed).
+- `GitHubClientTest` — base64 decoding, PR filtering, auth headers, fork verification,
+  rate-limit classification, request bodies (author identity, parents), ref deletion.
+- `StoreTest` — processed/skipped memory persistence and clearing, draft lifecycle, daily counts.
+- `EngineUtilsTest` / `EditValidatorsTest` — ranking, slugs, labels, JSON/YAML validators.
+
+Run locally with `./gradlew testDebugUnitTest`.
 
 ## Configuration (Setup tab)
 

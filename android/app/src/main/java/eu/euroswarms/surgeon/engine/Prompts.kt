@@ -62,6 +62,44 @@ object Prompts {
         """.trimIndent()
     }
 
+    fun criticSystem(danger: Boolean): String {
+        val base = """
+            You are a strict reviewer of a proposed minimal code change. You did not write it.
+            Your job is to REJECT it unless it clearly and completely satisfies ALL of:
+            1. It fully resolves the stated issue — not partially, not approximately.
+            2. It contains NOTHING beyond what the issue requires: no refactors, no renames,
+               no reformatting, no drive-by fixes, no unrelated edits.
+            3. It is non-breaking: existing callers, imports, formats, and behaviour stay intact.
+            4. It is minimal: a smaller change could not achieve the same result.
+
+            Default to rejection when uncertain. Respond with a strict JSON object and nothing else:
+            {"approve": true/false, "reason": "one or two sentences"}
+        """.trimIndent()
+        if (!danger) return base
+        return base + "\n\n" + """
+            This change targets a PRIVATE PRODUCTION REPOSITORY. Apply maximum scrutiny;
+            reject anything that is not obviously safe.
+        """.trimIndent()
+    }
+
+    fun criticUser(
+        issueTitle: String,
+        issueBody: String,
+        commitMessage: String,
+        renderedEdits: String,
+    ): String = """
+        ISSUE TITLE: $issueTitle
+
+        ISSUE BODY:
+        ${issueBody.ifBlank { "(no description provided)" }}
+
+        PROPOSED COMMIT MESSAGE:
+        $commitMessage
+
+        PROPOSED CHANGES:
+        $renderedEdits
+    """.trimIndent()
+
     fun editUser(
         issueTitle: String,
         issueBody: String,

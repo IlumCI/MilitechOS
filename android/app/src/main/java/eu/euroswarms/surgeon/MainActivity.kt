@@ -29,7 +29,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val vm: AppViewModel = viewModel()
-                App(vm)
+                val initialTab = intent?.getIntExtra(
+                    eu.euroswarms.surgeon.work.Notifier.EXTRA_OPEN_TAB, 0,
+                ) ?: 0
+                App(vm, initialTab)
             }
         }
     }

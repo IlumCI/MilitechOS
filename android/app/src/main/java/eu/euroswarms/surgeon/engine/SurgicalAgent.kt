@@ -26,6 +26,9 @@ private data class EditPlan(
     val edits: List<AgentEdit> = emptyList(),
 )
 
+@Serializable
+private data class CriticVerdict(val approve: Boolean = false, val reason: String = "")
+
 /** The materialized, validated result of the edit phase, ready to commit. */
 sealed interface AgentOutcome {
     data class Ready(
@@ -137,6 +140,37 @@ class SurgicalAgent(private val ollama: OllamaClient) {
         return AgentOutcome.Ready(outEdits, finalContents, message, plan.reason)
     }
 
+    /**
+     * Independent self-review: a second model call that critiques the produced change against
+     * the issue and must actively approve it. Returns (approved, reason).
+     */
+    suspend fun critique(
+        issueTitle: String,
+        issueBody: String,
+        outcome: AgentOutcome.Ready,
+        danger: Boolean,
+    ): Pair<Boolean, String> {
+        val rendered = outcome.edits.joinToString("\n\n") { edit ->
+            buildString {
+                append("FILE: ${edit.path}")
+                if (edit.isNew) append(" (new file)")
+                append('\n')
+                edit.oldString?.let { append("REMOVED:\n${it.take(CRITIC_SNIPPET_CHARS)}\n") }
+                append("ADDED:\n${edit.newString.take(CRITIC_SNIPPET_CHARS)}")
+            }
+        }
+        val raw = ollama.chat(
+            messages = listOf(
+                ChatMessage("system", Prompts.criticSystem(danger)),
+                ChatMessage("user", Prompts.criticUser(issueTitle, issueBody, outcome.commitMessage, rendered)),
+            ),
+            temperature = 0.0,
+        )
+        val verdict = parse(raw, CriticVerdict.serializer())
+            ?: return false to "Critic output unparseable"
+        return verdict.approve to verdict.reason.ifBlank { if (verdict.approve) "approved" else "no reason given" }
+    }
+
     // ---- helpers ----
 
     private fun <T> parse(raw: String, serializer: kotlinx.serialization.KSerializer<T>): T? {
@@ -168,5 +202,6 @@ class SurgicalAgent(private val ollama: OllamaClient) {
         const val MAX_FILES = 3
         const val MAX_FILES_DANGER = 2
         const val MAX_CHANGED_BYTES = 8_000
+        const val CRITIC_SNIPPET_CHARS = 2_000
     }
 }

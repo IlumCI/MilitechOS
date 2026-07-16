@@ -15,16 +15,21 @@ import java.util.Calendar
 import java.util.UUID
 
 /**
- * Lightweight JSON-file persistence for drafts, logs, and the set of already-processed
- * issues (so the bot never picks the same issue twice). Exposed as StateFlows for Compose.
+ * Lightweight JSON-file persistence for drafts, logs, and issue memory. Exposed as StateFlows
+ * for Compose. Constructed from a plain directory so the whole class is JVM-unit-testable.
+ *
+ * Issue memory is split in two:
+ *  - processed: permanently handled (drafted, or dead at re-check). Never picked again.
+ *  - skipped:   retryable outcomes (agent abstained/rejected, validation/critic failure).
+ *               Excluded from selection until the user clears them ("Retry skipped").
  */
-class Store(context: Context) {
+class Store(private val dir: File) {
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = false }
-    private val dir: File = context.filesDir
     private val draftsFile = File(dir, "drafts.json")
     private val logsFile = File(dir, "logs.json")
     private val processedFile = File(dir, "processed.json")
+    private val skippedFile = File(dir, "skipped.json")
     private val mutex = Mutex()
 
     private val _drafts = MutableStateFlow(readDrafts())
@@ -33,7 +38,11 @@ class Store(context: Context) {
     private val _logs = MutableStateFlow(readLogs())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    private val processed: MutableSet<String> = readProcessed().toMutableSet()
+    private val processed: MutableSet<String> = readStringSet(processedFile).toMutableSet()
+    private val skipped: MutableSet<String> = readStringSet(skippedFile).toMutableSet()
+
+    private val _skippedCount = MutableStateFlow(skipped.size)
+    val skippedCount: StateFlow<Int> = _skippedCount.asStateFlow()
 
     // ---- Drafts ----
 
@@ -67,15 +76,33 @@ class Store(context: Context) {
         logsFile.writeText(json.encodeToString(ListSerializer(LogEntry.serializer()), list))
     }
 
-    // ---- Processed issues ----
+    // ---- Issue memory ----
 
     fun isProcessed(repoFullName: String, issueNumber: Int): Boolean =
-        processed.contains("$repoFullName#$issueNumber")
+        processed.contains(key(repoFullName, issueNumber))
 
     suspend fun markProcessed(repoFullName: String, issueNumber: Int) = mutex.withLock {
-        processed.add("$repoFullName#$issueNumber")
+        processed.add(key(repoFullName, issueNumber))
         processedFile.writeText(json.encodeToString(SetSerializer(String.serializer()), processed))
     }
+
+    fun isSkipped(repoFullName: String, issueNumber: Int): Boolean =
+        skipped.contains(key(repoFullName, issueNumber))
+
+    suspend fun markSkipped(repoFullName: String, issueNumber: Int) = mutex.withLock {
+        skipped.add(key(repoFullName, issueNumber))
+        _skippedCount.value = skipped.size
+        skippedFile.writeText(json.encodeToString(SetSerializer(String.serializer()), skipped))
+    }
+
+    /** Forget all retryable skips so those issues become eligible again. */
+    suspend fun clearSkipped() = mutex.withLock {
+        skipped.clear()
+        _skippedCount.value = 0
+        skippedFile.writeText(json.encodeToString(SetSerializer(String.serializer()), skipped))
+    }
+
+    private fun key(repoFullName: String, issueNumber: Int) = "$repoFullName#$issueNumber"
 
     // ---- IO helpers ----
 
@@ -89,9 +116,9 @@ class Store(context: Context) {
         else json.decodeFromString(ListSerializer(LogEntry.serializer()), logsFile.readText())
     }.getOrDefault(emptyList())
 
-    private fun readProcessed(): Set<String> = runCatching {
-        if (!processedFile.exists()) emptySet()
-        else json.decodeFromString(SetSerializer(String.serializer()), processedFile.readText())
+    private fun readStringSet(file: File): Set<String> = runCatching {
+        if (!file.exists()) emptySet()
+        else json.decodeFromString(SetSerializer(String.serializer()), file.readText())
     }.getOrDefault(emptySet())
 
     private fun startOfToday(): Long {
@@ -109,7 +136,7 @@ class Store(context: Context) {
         @Volatile private var instance: Store? = null
         fun get(context: Context): Store =
             instance ?: synchronized(this) {
-                instance ?: Store(context.applicationContext).also { instance = it }
+                instance ?: Store(context.applicationContext.filesDir).also { instance = it }
             }
     }
 }
