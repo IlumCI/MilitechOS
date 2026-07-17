@@ -2,9 +2,8 @@ name: Test & Deploy Surgeon PWA
 
 on:
   push:
-    paths:
-      - "web/**"
-      - ".github/workflows/web.yml"
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -13,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -40,7 +39,9 @@ jobs:
           CHROME_PATH="$(command -v google-chrome || command -v chromium-browser || command -v chromium)" \
             node tests-browser/smoke.mjs
 
+  # Deploys ONLY from main (push or manual dispatch), and only after tests pass.
   deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     environment:
