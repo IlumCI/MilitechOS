@@ -1,0 +1,14 @@
+{
+  "name": "Surgeon — surgical PR automation",
+  "short_name": "Surgeon",
+  "description": "Automates issue → fork branch → surgical AI draft; you review and open every PR.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#111418",
+  "theme_color": "#2e5aac",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

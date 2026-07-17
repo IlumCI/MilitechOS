@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#2e5aac" />
+  <title>Surgeon</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Surgeon <span id="tab-title"></span></h1>
+    <button id="install-btn" class="ghost hidden" type="button">Install app</button>
+  </header>
+
+  <main id="view"></main>
+
+  <nav class="tabbar">
+    <button data-tab="dashboard" class="active" type="button">🏠<span>Dashboard</span></button>
+    <button data-tab="issues" type="button">🔍<span>Issues</span></button>
+    <button data-tab="review" type="button">📋<span>Review</span></button>
+    <button data-tab="setup" type="button">⚙️<span>Setup</span></button>
+  </nav>
+
+  <dialog id="repo-dialog"></dialog>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "surgeon-pwa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Surgical PR automation PWA — zero dependencies, tests run on node:test",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}
