@@ -1,112 +1,71 @@
-# AgentOS
+# Surgeon
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+**Surgical PR automation with a human gate.** Surgeon finds an open issue in the repos you work
+on, prepares an issue branch on your fork, has an Ollama model draft the *smallest possible*
+change that resolves it, commits the change under your identity — and then hands you the diff
+and a one-tap compare link. **You** review and open every pull request. Nothing ships without
+your eyes on it.
 
+Runs as an installable **Progressive Web App** on desktop and mobile. Zero dependencies, no
+build step: vanilla ES modules served straight from GitHub Pages.
 
-A minimal, production-ready implementation of Andrej Karpathy's Agent Operating System architecture, developed by Swarms.ai and partners.
+**Live app:** https://ilumci.github.io/MilitechOS/
 
-![AgentOS Architecture](https://miro.medium.com/v2/resize:fit:748/1*quuHoEjoCzxvu5lVp_SMEQ@2x.jpeg)
+## How it works
 
-## Overview
+```
+pick issue ──► verify fork ──► fast-forward to upstream ──► locate files (model)
+     │              │                    │
+     │              │                    └─ diverged fork? STOP (no merge conflicts, ever)
+     │              └─ explicit fork mapping is verified, never guessed
+     │
+     ▼
+plan surgical edits (model) ──► validate: exact-match replacements, file/size caps,
+     │                          JSON parses, YAML sane, nothing left empty
+     ▼
+independent critic pass (model) — must actively approve; fails closed
+     ▼
+re-check issue is still open/unassigned ──► commit as you ──► YOU review & open the PR
+```
 
-AgentOS is a lightweight, single-file implementation that provides a robust foundation for building autonomous AI agents. It implements the core concepts outlined in Karpathy's Agent OS architecture while maintaining simplicity and extensibility. Developed by [Swarms.ai](https://swarms.ai) and its partners, AgentOS is a production-ready implementation of autonomous AI agents that follows the architectural principles outlined by Andrej Karpathy.
+Safety rails: issues with `wontfix`/`duplicate`/`question`-style labels are never picked;
+abstains and rejections go to retryable *skip memory*; discarded drafts delete their branch;
+a janitor sweeps orphaned `surgeon/`-prefixed branches; GitHub rate limits back off cleanly.
+Private repos get stricter caps and a **PRIVATE** badge so you scrutinise those diffs harder.
 
+## Quick start
 
-## Features
+1. Open the [live app](https://ilumci.github.io/MilitechOS/) (or serve `web/` with any static
+   server). Install it from the browser menu if you want an app window.
+2. In **Setup**: paste a GitHub token (`repo` scope), point at your Ollama endpoint, pick a
+   model (the **List ▾** button queries `/api/tags`), adjust repos/fork mappings, save.
+3. **Dashboard → Draft one PR now**, or cherry-pick from the **Issues** tab.
+4. **Review** the diff, tap **Open PR**, submit on GitHub. That's the whole loop.
 
-- **Unified Model Interface**: Seamless integration with multiple LLM providers through LiteLLM
-  - Support for Anthropic Claude models (Opus, Sonnet, Haiku)
-  - Integration with OpenAI GPT models
-  - Access to optimized variants (GPT-4o, GPT-4o-mini)
-- **Browser Automation**: Built-in browser agent capabilities for web interaction using browser-use
-- **Multi-Modal Support**: 
-  - Text processing and generation
-  - Video analysis through Google's Gemini models
-  - Audio processing and speech synthesis
-  - Image handling capabilities
-- **Resource Management**: 
-  - Efficient handling of computational resources
-  - Dynamic model selection based on task requirements
-  - Automatic GPU/CPU optimization
-- **HuggingFace Integration**: 
-  - Direct access to open-source models
-  - Support for text generation and multiple NLP tasks
-  - Automatic model quantization and optimization
-- **Extensible Architecture**: Easy to add new capabilities and tools
+Ollama notes: self-hosted servers must allow the app's origin via `OLLAMA_ORIGINS`. A local
+`ollama serve` can run cloud models (e.g. `deepseek-v4-flash:cloud`) and handles cloud auth —
+point the app at `http://localhost:11434`.
 
-## Core Components
+## Repository layout
 
-- **Model Management**: Dynamic selection and utilization of language models
-- **Browser Automation**: Autonomous web-based task execution
-- **Resource Orchestration**: Efficient management of computational resources
-- **Context Management**: Maintains system state and task dependencies
+| Path | What |
+|------|------|
+| `web/` | The entire app — UI, engine, clients, service worker. See [`web/README.md`](web/README.md) for full docs, honest limitations, and the testing story. |
+| `web/tests/` | 65 unit/integration tests (`node --test`), including an end-to-end engine test against fake GitHub/Ollama servers. |
+| `web/tests-browser/` | 16-check Chromium smoke test of the real UI. |
+| `.github/workflows/web.yml` | CI: tests gate every push and PR; green `main` deploys to GitHub Pages. |
 
-## Installation
+## Development
 
 ```bash
-pip3 install -U agentos-sdk
+cd web
+npm test                       # unit + integration (no dependencies)
+python3 -m http.server 8080    # or any static server, then open localhost:8080
 ```
 
-## Usage
-
-```python
-from agentos_sdk import AgentOS
-from dotenv import load_dotenv
-
-load_dotenv()
-
-agent = AgentOS(plan_on=False, max_loops=1)
-
-agent.run(
-    "Generate a video of a cat surfing on a wave at sunset, cinematic style. Save it as 'cat_surfing.mp4. We should also add cat sounds and meowing sounds."
-)
-
-```
-
-## Available Tools
-
-AgentOS comes with a powerful set of built-in tools that enable various capabilities. Here's a comprehensive list of all available tools:
-
-| Tool Name | Description | Use Case Examples |
-|-----------|-------------|------------------|
-| Browser Agent | Autonomous web browser automation tool that can navigate websites, extract information, and perform web-based tasks | - Web scraping<br>- Form filling<br>- Data extraction<br>- Website testing |
-| Hugging Face Model | Interface for using various Hugging Face models for text generation and other NLP tasks | - Text generation<br>- Language translation<br>- Text classification<br>- Custom model inference |
-| LiteLLM Model | Unified interface for multiple LLM providers including OpenAI, Anthropic, and others | - Text generation<br>- Chat completion<br>- Content creation<br>- Advanced reasoning |
-| Safe Calculator | Secure mathematical expression evaluator with built-in safety checks | - Mathematical calculations<br>- Formula evaluation<br>- Secure computation<br>- Numeric processing |
-| Terminal Developer Agent | Advanced agent for performing terminal operations and development tasks | - File operations<br>- Code execution<br>- System commands<br>- Development tasks |
-| Generate Speech | Text-to-speech conversion tool supporting multiple voices and models | - Audio content creation<br>- Voice synthesis<br>- Accessibility features<br>- Audio narration |
-| Generate Video | AI-powered video generation tool using Google's Veo 3.0 model | - Video content creation<br>- Visual storytelling<br>- Animation generation<br>- Creative content |
-| Create Files | Tool for creating new files in the workspace with specified content | - Document creation<br>- Code file generation<br>- Report writing<br>- Configuration files |
-| Update Files | Tool for updating existing files by overwriting their content | - Content modification<br>- File updates<br>- Document revisions<br>- Configuration changes |
-
-
-## Community 
-
-Join our community of agent engineers and researchers for technical support, cutting-edge updates, and exclusive access to world-class agent engineering insights!
-
-| Platform | Description | Link |
-|----------|-------------|------|
-| 📚 Documentation | Official documentation and guides | [docs.swarms.world](https://docs.swarms.world) |
-| 📝 Blog | Latest updates and technical articles | [Medium](https://medium.com/@kyeg) |
-| 💬 Discord | Live chat and community support | [Join Discord](https://discord.gg/jM3Z6M9uMq) |
-| 🐦 Twitter | Latest news and announcements | [@kyegomez](https://twitter.com/swarms_corp) |
-| 👥 LinkedIn | Professional network and updates | [The Swarm Corporation](https://www.linkedin.com/company/the-swarm-corporation) |
-| 📺 YouTube | Tutorials and demos | [Swarms Channel](https://www.youtube.com/channel/UC9yXyitkbU_WSy7bd_41SqQ) |
-| 🎫 Events | Join our community events | [Sign up here](https://lu.ma/5p2jnc2v) |
-| 🚀 Onboarding Session | Get onboarded with Kye Gomez, creator and lead maintainer of Swarms | [Book Session](https://cal.com/swarms/swarms-onboarding-session) |
-
-## Contributing
-
-We welcome contributions from the community. Please see our contributing guidelines for more information. 
+The project began as a native Android app (Kotlin/Compose); those sources live in git history
+before the "Replace Android app with Surgeon PWA" commit.
 
 ## License
 
-This project is under the MIT License.
-
-## Todo
-
-- [ ] Add deep research agent or sub agent
-- [ ] Implement video and audio processing
-- [ ] Create better system prompt and add multiple shot examples on when to use certain tools and etc 
+MIT — see [LICENSE](LICENSE).
