@@ -1,0 +1,182 @@
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1a1c1e;
+  --muted: #6b7280;
+  --primary: #2e5aac;
+  --primary-contrast: #ffffff;
+  --danger: #b3261e;
+  --success: #1b6e2f;
+  --warn: #8a5a00;
+  --border: #d8dce2;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418;
+    --card: #1b1f24;
+    --text: #e6e8ea;
+    --muted: #9aa2ac;
+    --primary: #9ec1ff;
+    --primary-contrast: #10233f;
+    --danger: #ffb4ab;
+    --success: #8fd694;
+    --warn: #e6c36b;
+    --border: #333941;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  padding-top: calc(12px + env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.topbar h1 { font-size: 1.05rem; margin: 0; }
+.topbar #tab-title { color: var(--muted); font-weight: normal; }
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px;
+  padding-bottom: 90px;
+}
+
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--card);
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: 5;
+}
+.tabbar button {
+  flex: 1;
+  padding: 8px 4px 10px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.tabbar button span { font-size: 0.7rem; }
+.tabbar button.active { color: var(--primary); font-weight: 600; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.card h3 { margin: 0 0 8px; font-size: 0.95rem; }
+
+button.primary, button.outline, button.ghost, button.small {
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+}
+button.primary {
+  background: var(--primary);
+  color: var(--primary-contrast);
+  border-color: var(--primary);
+  width: 100%;
+}
+button.outline { width: 100%; }
+button.small { padding: 6px 10px; font-size: 0.85rem; width: auto; }
+button.ghost { border: none; background: none; color: var(--primary); }
+button:disabled { opacity: 0.5; cursor: default; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; }
+.row .fit { flex: 0 0 auto; }
+
+label.field { display: block; margin-bottom: 10px; font-size: 0.85rem; color: var(--muted); }
+label.field input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.95rem;
+}
+label.check { display: flex; gap: 8px; align-items: center; margin: 12px 0; cursor: pointer; }
+
+.muted { color: var(--muted); font-size: 0.85rem; }
+.error { color: var(--danger); }
+.success { color: var(--success); }
+.warn { color: var(--warn); }
+h2.section { font-size: 0.9rem; margin: 18px 0 8px; }
+
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+
+pre.diff {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre.diff.removed { color: var(--danger); }
+pre.diff.added { color: var(--success); }
+
+.log-line { font-size: 0.82rem; margin: 3px 0; }
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--text);
+  width: min(94vw, 460px);
+  padding: 18px;
+}
+dialog::backdrop { background: rgb(0 0 0 / 45%); }
+
+.hidden { display: none !important; }
+.issue-title { margin: 4px 0; }
+.mono { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: 0.82rem; }
